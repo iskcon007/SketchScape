@@ -13,6 +13,9 @@ IMG_SIZE = (224, 224)
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
+# NEW: backend-only uncertainty band (e.g., within ±10% of 0.5 is "uncertain")
+UNCERTAINTY_BAND = 0.10  # tweak to 0.08 or 0.12 if you want stricter/looser behavior
+
 # ─── HELPER FUNCTIONS ──────────────────────────────────────
 def load_and_prepare_image(uploaded_file):
     img = Image.open(uploaded_file).convert("RGB")
@@ -22,12 +25,18 @@ def load_and_prepare_image(uploaded_file):
     return img, original_size
 
 def predict_image(img, model):
+    # Returns label + raw probability (kept private)
     img_array = tf.keras.preprocessing.image.img_to_array(img)
     img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
     img_array = np.expand_dims(img_array, axis=0)
-    prob = model.predict(img_array, verbose=0)[0][0]
+    prob = model.predict(img_array, verbose=0)[0][0]  # prob of "sketch" (per your mapping)
     label = "real" if prob < 0.5 else "sketch"
     return label, prob
+
+# NEW: backend helper — determines if prediction is uncertain (not shown to user)
+def is_uncertain(prob, band=UNCERTAINTY_BAND):
+    # Uncertain when prob is close to 0.5 (i.e., model isn't confident either way)
+    return abs(prob - 0.5) <= band
 
 def get_last_conv_layer_name(model):
     """Find the last Conv2D layer in the model automatically."""
@@ -48,11 +57,9 @@ def make_gradcam_heatmap(img_array, model, last_conv_layer_name):
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_array)
 
-        # If predictions is a list → unwrap it
         if isinstance(predictions, list):
             predictions = predictions[0]
 
-        # Auto-handle binary vs multi-class
         if predictions.shape[-1] == 1:
             loss = predictions[:, 0]
         else:
@@ -111,11 +118,17 @@ if uploaded_file:
     label, prob = predict_image(img, model)
     st.markdown(f"### 🔍 Prediction: **{label.upper()}**")   # only label, no probability shown
 
+    # NEW: show friendly reassurance ONLY when backend deems it uncertain
+    if is_uncertain(prob):
+        st.info("💡 Don't worry about the accuracy — this project is still under process. "
+                "We hope you find the exact result you're looking for. "
+                "If not, please try another image. 🙏")
+
     # 🎨 IMAGE CONVERSIONS
     st.markdown("---")
     st.subheader("🎨 Image Conversion (Only for REAL images)")
     if label == "real":
-        conversion = st.selectbox("Convert to:", 
+        conversion = st.selectbox("Convert to:",
                                   ["None", "Grayscale", "Color-enhance", "Sepia", "Edge Detection", "Invert Colors"],
                                   key="conversion_box")
         converted = img
@@ -143,11 +156,9 @@ if uploaded_file:
     st.subheader("🔥 Grad-CAM Visualization")
     try:
         img_array = tf.keras.preprocessing.image.img_to_array(img)
-        img_array = np.expand_dims(img_array, axis=0) / 255.0
-
+        img_array = np.expand_dims(img_array, axis=0) / 255.0  # keeping your current approach
         last_conv_layer_name = get_last_conv_layer_name(model)   # auto-detect last Conv2D
         heatmap = make_gradcam_heatmap(img_array, model, last_conv_layer_name)
-
         result = overlay_heatmap(img, heatmap)
         st.image(result, caption=f"Grad-CAM Overlay (Layer: {last_conv_layer_name})", use_container_width=True)
     except Exception as e:
@@ -162,4 +173,3 @@ if uploaded_file:
     log_df.to_csv(csv_path, index=False)
     with open(csv_path, "rb") as f:
         st.download_button("📥 Download Prediction Log", f, file_name="prediction_log.csv")
-
